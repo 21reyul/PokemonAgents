@@ -1,11 +1,19 @@
 import pandas as pd
+import json
 import subprocess
 import multiprocessing
+from tqdm import tqdm
 
 TYPE_DICTIONARY = {}
 REMOVED_POKEMON_COLUMNS = ['Mean', 'Standard Deviation', 'Experience type', 'Experience to level 100', 'Final Evolution', 'Legendary', 'Alolan Form', 'Galarian Form', 'Against Normal', 'Against Fire', 'Against Water', 'Against Electric', 'Against Grass', 'Against Ice', 'Against Fighting', 'Against Poison', 'Against Ground', 'Against Flying', 'Against Psychic', 'Against Bug', 'Against Rock', 'Against Ghost', 'Against Dragon', 'Against Dark', 'Against Steel', 'Against Fairy', 'Height', 'Weight', 'BMI']
 REMOVED_MOVES_COLUMNS = ['contest_type_id', 'contest_effect_id', 'super_contest_effect_id']
-REMOVED_MOVES_POKEMON_COLUMNS = ['version_group_id', 'pokemon_move_method_id', 'level', 'order']
+REMOVED_MOVES_POKEMON_COLUMNS = ['version_group_id', 'pokemon_move_method_id', 'order']
+
+# Auxiliar function that devides the df on some bulks to optimize the insertions 
+def batch(iterable, n):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
 
 # Function that gets the range of execution for the storage
 def range_calculus(number_entries, process):
@@ -33,13 +41,14 @@ def types_loading(filename = "data/csv/Types.csv"):
 
 # Function that reads the whole csv and stores it
 def pokemon_loading(filename = "data/csv/Pokemon.csv"):
+    documents = []
     pokemon_csv = pd.read_csv(filename) 
     pokemon_csv = pokemon_csv.drop(columns=REMOVED_POKEMON_COLUMNS)
-    print(pokemon_csv.columns.tolist())
-    for _, pokemon in pokemon_csv.iterrows():
+    for _, pokemon in tqdm(pokemon_csv.iterrows(), total = len(pokemon_csv)):
         data = {
                 "id": int(pokemon["Number"]),
                 "name": str(pokemon["Name"]),
+                "generation": int(pokemon["Generation"]),
                 "first_type": TYPE_DICTIONARY[(str(pokemon["Type 1"])).lower()],
                 "abilities": pokemon["Abilities"], 
                 "health": int(pokemon["HP"]),
@@ -54,18 +63,21 @@ def pokemon_loading(filename = "data/csv/Pokemon.csv"):
 
         if pd.notna(pokemon["Mega Evolution"]):
             data["mega_evolution"] = 1
-  
-        if (subprocess.run(["mongosh", "--eval", f"db.pokemon.findOne({data})"], capture_output=True, text=True).stdout.strip() == "null"):
-            print(subprocess.run(["mongosh", "--eval", f"db.pokemon.insertOne({data})"]))
-        else:
-            print(f"{pokemon["Name"]} already stored")
+
+        documents.append(data)
+
+        #subprocess.run(["mongosh", "--eval", f"db.pokemon.createIndex({json.dumps({"id": data["id"], "generation": data["generation"]})}, {{unique: true}})"])
+
+    for b in batch(documents, 100):
+        print(subprocess.run(["mongosh", "--eval", f"db.pokemon.insertMany({b})"]))
 
 # Function that reads MovesStorage.csv and stores the information needed1
 def moves_loading(filename = "data/csv/MovesStorage.csv"):
+    documents = []
     moves_csv = pd.read_csv(filename)
     moves_csv = moves_csv.drop(columns=REMOVED_MOVES_COLUMNS)
     print(moves_csv.columns.tolist())
-    for _, moves in moves_csv.iterrows():
+    for _, moves in tqdm(moves_csv.iterrows(), total = len(moves_csv)):
         data = {
             "id": int(moves["id"]),
             "identifier": str(moves["identifier"]),
@@ -88,26 +100,33 @@ def moves_loading(filename = "data/csv/MovesStorage.csv"):
 
         if pd.notna(moves["effect_chance"]):
             data["effect_chance"] = int(moves["effect_chance"])
-        
-        if (subprocess.run(["mongosh", "--eval", f"db.movements.findOne({data})"], capture_output=True, text=True).stdout.strip() == "null"):
-            print(subprocess.run(["mongosh", "--eval", f"db.movements.insertOne({data})"]))
 
-        else:
-            print(f"{data} already stored")
+        #subprocess.run(["mongosh", "--eval", f"db.movements.createIndex({data}, {{unique: true}})"])
+
+        documents.append(data)
+
+    for b in batch(documents, 100):
+        print(subprocess.run(["mongosh", "--eval", f"db.movements.insertMany({b})"]))
 
 # Auxiliar function that stores the data to the db
 def loading_moves_pokemon(moves_pokemon_csv):
-    for _, moves_pokemon in moves_pokemon_csv.iterrows():
+    documents = []
+    for _, moves_pokemon in tqdm(moves_pokemon_csv.iterrows(), total = len(moves_pokemon_csv)):
         data = {
             "pokemon_id": int(moves_pokemon["pokemon_id"]),
-            "move_id": int(moves_pokemon["move_id"])
+            "move_id": int(moves_pokemon["move_id"]),
+            "level": int(moves_pokemon["level"])
         }
+        #subprocess.run(["mongosh", "--eval", f"db.movementsPokemon.createIndex({data}, {unique: true})"])
         
-        if(subprocess.run(["mongosh", "--eval", f"db.movementsPokemon.findOne({data})"], capture_output=True, text=True).stdout.strip() == "null"):
-            print(subprocess.run(["mongosh", "--eval", f"db.movementsPokemon.insertOne({data})"]))
+        #if(subprocess.run(["mongosh", "--eval", f"db.movementsPokemon.findOne({data})"], capture_output=True, text=True).stdout.strip() == "null"):
+        documents.append(data)
         
-        else:
-            print(f"{data} is already stored")
+        # else:
+        #     print(f"{data} is already stored")
+    for b in batch(documents, 1000):
+        subprocess.run(["mongosh", "--eval", f"db.movementsPokemon.insertMany({b})"])
+    
 
 # This function stores the relation between moves and pokemons
 def relation_moves_pokemon(filename = "data/csv/PokemonMoves.csv", process = 4):
